@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5" />
+      <stop offset="100%" stop-color="#7c3aed" />
+    </linearGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+  </defs>
+  <!-- Background with rounded corners -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  
+  <!-- Outer Stopwatch / Timer Ring -->
+  <circle cx="256" cy="270" r="140" fill="none" stroke="rgba(255, 255, 255, 0.2)" stroke-width="24" />
+  <circle cx="256" cy="270" r="140" fill="none" stroke="url(#ring)" stroke-width="24" stroke-linecap="round" stroke-dasharray="880" stroke-dashoffset="260" transform="rotate(-90 256 270)" />
+  
+  <!-- Top button / crown of stopwatch -->
+  <rect x="236" y="80" width="40" height="28" rx="8" fill="#ffffff" />
+  <rect x="220" y="64" width="72" height="18" rx="6" fill="#e0e7ff" />
+  
+  <!-- Center Hands -->
+  <circle cx="256" cy="270" r="16" fill="#ffffff" />
+  <line x1="256" y1="270" x2="256" y2="175" stroke="#ffffff" stroke-width="14" stroke-linecap="round" />
+  <line x1="256" y1="270" x2="325" y2="270" stroke="#38bdf8" stroke-width="12" stroke-linecap="round" />
+</svg>
