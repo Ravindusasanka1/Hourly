@@ -4,24 +4,31 @@ import {
   BarElement,
   CategoryScale,
   Chart as ChartJS,
+  Filler,
   Legend,
   LinearScale,
+  LineElement,
+  PointElement,
   Title,
   Tooltip,
+  type TooltipItem,
 } from 'chart.js';
-import { Bar, Doughnut } from 'react-chartjs-2';
+import { Bar, Doughnut, Line } from 'react-chartjs-2';
 import { ChevronLeftIcon, ChevronRightIcon } from '../components/icons';
 import { useNow } from '../hooks/useNow';
 import {
   calculateStatsSummary,
+  calculateTrendComparison,
   canNavigateNext,
   formatDuration,
   formatPeriodLabel,
   getBarBins,
   getPeriodRange,
+  getTrendSeries,
   MS_PER_HOUR,
   shiftPeriod,
   type StatsPeriod,
+  type TrendFilter,
 } from '../lib/time';
 import { useAppStore } from '../store/useAppStore';
 
@@ -32,6 +39,9 @@ ChartJS.register(
   CategoryScale,
   LinearScale,
   BarElement,
+  LineElement,
+  PointElement,
+  Filler,
   Title,
 );
 
@@ -50,6 +60,7 @@ export function StatsPage() {
 
   const [period, setPeriod] = useState<StatsPeriod>('day');
   const [referenceDate, setReferenceDate] = useState<number>(now);
+  const [trendFilter, setTrendFilter] = useState<TrendFilter>({ kind: 'type' });
 
   const handlePeriodChange = (nextPeriod: StatsPeriod) => {
     setPeriod(nextPeriod);
@@ -70,7 +81,30 @@ export function StatsPage() {
   const summary = calculateStatsSummary(entries, activeTimer, categories, rangeStart, rangeEnd, now);
   const bins = getBarBins(period, referenceDate, entries, activeTimer, now);
   const periodLabel = formatPeriodLabel(period, referenceDate, now);
-  const hasData = summary.totalMs > 0;
+
+  // Ensure selected category filter stays valid if category is removed
+  const effectiveTrendFilter: TrendFilter =
+    trendFilter.kind === 'category' && !categories.some((c) => c.id === trendFilter.categoryId)
+      ? { kind: 'all' }
+      : trendFilter;
+
+  const trendSeries = getTrendSeries(effectiveTrendFilter, bins, categories, period);
+  const trendComparison = calculateTrendComparison(
+    effectiveTrendFilter,
+    period,
+    referenceDate,
+    entries,
+    activeTimer,
+    categories,
+    now,
+  );
+
+  const hasData = summary.totalMs > 0 || trendComparison.previousMs > 0;
+
+  // Categories available in filter chips (non-archived or having data in the current period)
+  const selectableCategories = categories.filter(
+    (c) => !c.archived || (summary.categoryTotals[c.id] ?? 0) > 0,
+  );
 
   // Active or represented categories for doughnut chart
   const activeCategoriesWithData = categories.filter((c) => (summary.categoryTotals[c.id] ?? 0) > 0);
@@ -95,7 +129,7 @@ export function StatsPage() {
       },
       tooltip: {
         callbacks: {
-          label: (context: any) => {
+          label: (context: TooltipItem<'doughnut'>) => {
             const ms = context.parsed;
             const share = Math.round((ms / (summary.totalMs || 1)) * 100);
             return ` ${context.label}: ${formatDuration(ms)} (${share}%)`;
@@ -104,6 +138,99 @@ export function StatsPage() {
       },
     },
     cutout: '70%',
+  };
+
+  const shouldFillPulseArea = effectiveTrendFilter.kind === 'category' || effectiveTrendFilter.kind === 'type';
+
+  const lineDatasets = [
+    ...trendSeries.datasets.map((ds) => ({
+      label: ds.label,
+      data: ds.hoursData,
+      borderColor: ds.color,
+      backgroundColor: `${ds.color}22`,
+      fill: shouldFillPulseArea,
+      tension: 0.38,
+      borderWidth: effectiveTrendFilter.kind === 'category' ? 2.5 : 2,
+      pointRadius: ds.hoursData.map((v) => (v > 0 ? 3 : 0)),
+      pointHoverRadius: 5,
+      pointBackgroundColor: ds.color,
+      pointBorderColor: '#ffffff',
+      pointBorderWidth: 1.5,
+    })),
+    ...(trendSeries.dailyGoalHours !== null
+      ? [
+          {
+            label: 'Daily Goal',
+            data: trendSeries.labels.map(() => trendSeries.dailyGoalHours ?? 0),
+            borderColor: '#94a3b8',
+            backgroundColor: 'transparent',
+            borderDash: [5, 5],
+            borderWidth: 1.5,
+            pointRadius: 0,
+            pointHoverRadius: 0,
+            fill: false,
+            tension: 0,
+          },
+        ]
+      : []),
+  ];
+
+  const lineData = {
+    labels: trendSeries.labels,
+    datasets: lineDatasets,
+  };
+
+  const maxTicksX = period === 'day' ? 6 : period === 'month' ? 7 : 12;
+
+  const formatYAxisTick = (value: string | number) => {
+    const num = Number(value);
+    if (num === 0) return '0';
+    if (num >= 1) return `${Number(num.toFixed(1))}h`;
+    return `${Math.round(num * 60)}m`;
+  };
+
+  const lineOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: {
+      mode: 'index' as const,
+      intersect: false,
+    },
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: {
+          color: '#94a3b8',
+          font: { size: 10 },
+          maxRotation: 0,
+          autoSkip: true,
+          maxTicksLimit: maxTicksX,
+        },
+      },
+      y: {
+        beginAtZero: true,
+        suggestedMax: 1,
+        grid: { color: 'rgba(148, 163, 184, 0.1)' },
+        ticks: {
+          color: '#94a3b8',
+          font: { size: 10 },
+          maxTicksLimit: 5,
+          callback: formatYAxisTick,
+        },
+      },
+    },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: (context: TooltipItem<'line'>) => {
+            const hours = context.parsed.y ?? 0;
+            const ms = Math.round(hours * MS_PER_HOUR);
+            return ` ${context.dataset.label}: ${formatDuration(ms)}`;
+          },
+        },
+      },
+    },
   };
 
   const barData = {
@@ -129,7 +256,7 @@ export function StatsPage() {
           font: { size: 10 },
           maxRotation: 0,
           autoSkip: true,
-          maxTicksLimit: period === 'day' ? 6 : period === 'month' ? 7 : 12,
+          maxTicksLimit: maxTicksX,
         },
       },
       y: {
@@ -140,12 +267,7 @@ export function StatsPage() {
           color: '#94a3b8',
           font: { size: 10 },
           maxTicksLimit: 5,
-          callback: (value: any) => {
-            const num = Number(value);
-            if (num === 0) return '0';
-            if (num >= 1) return `${num}h`;
-            return `${Math.round(num * 60)}m`;
-          },
+          callback: formatYAxisTick,
         },
       },
     },
@@ -153,8 +275,8 @@ export function StatsPage() {
       legend: { display: false },
       tooltip: {
         callbacks: {
-          label: (context: any) => {
-            const hours = context.parsed.y;
+          label: (context: TooltipItem<'bar'>) => {
+            const hours = context.parsed.y ?? 0;
             const ms = Math.round(hours * MS_PER_HOUR);
             return ` ${context.dataset.label}: ${formatDuration(ms)}`;
           },
@@ -162,6 +284,12 @@ export function StatsPage() {
       },
     },
   };
+
+  const isDeltaGood =
+    trendComparison.deltaMs === 0
+      ? null
+      : (trendComparison.deltaMs > 0 && trendComparison.increaseIsPositive) ||
+        (trendComparison.deltaMs < 0 && !trendComparison.increaseIsPositive);
 
   return (
     <div className="space-y-6">
@@ -265,34 +393,163 @@ export function StatsPage() {
             </div>
           </section>
 
-          {/* Category Share Doughnut Chart */}
-          <section aria-label="Category Share" className="card p-5">
-            <h3 className="mb-4 text-sm font-semibold text-slate-500 uppercase tracking-wide dark:text-slate-400">
-              Category Share
-            </h3>
-            <div className="relative mx-auto h-48 w-48">
-              <Doughnut data={doughnutData} options={doughnutOptions} />
-              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-xs text-slate-500 dark:text-slate-400">Total</span>
-                <span className="text-sm font-bold">{formatDuration(summary.totalMs)}</span>
-              </div>
+          {/* Category Pulse & Progress (Heart-Rate Trend Line Chart) */}
+          <section aria-label="Category Pulse & Progress" className="card p-5 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide dark:text-slate-400">
+                Pulse & Progress ({period})
+              </h3>
+              {trendSeries.dailyGoalHours !== null && (
+                <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  <span className="inline-block w-3 border-t-2 border-dashed border-slate-400" />
+                  Goal: {formatDuration(trendSeries.dailyGoalHours * MS_PER_HOUR)}/day
+                </span>
+              )}
             </div>
-            <div className="mt-4 flex flex-wrap justify-center gap-3">
-              {activeCategoriesWithData.map((c) => {
-                const share = Math.round(summary.categoryShares[c.id] ?? 0);
-                const ms = summary.categoryTotals[c.id] ?? 0;
+
+            {/* Filter Chips: Productive vs Wasted | All Categories | Individual Category Chips */}
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Trend filter">
+              <button
+                type="button"
+                id="trend-filter-type"
+                onClick={() => setTrendFilter({ kind: 'type' })}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  effectiveTrendFilter.kind === 'type'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-300 dark:hover:bg-white/15'
+                }`}
+              >
+                Productive vs Wasted
+              </button>
+              <button
+                type="button"
+                id="trend-filter-all"
+                onClick={() => setTrendFilter({ kind: 'all' })}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  effectiveTrendFilter.kind === 'all'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-300 dark:hover:bg-white/15'
+                }`}
+              >
+                All Categories
+              </button>
+              {selectableCategories.map((cat) => {
+                const isSelected =
+                  effectiveTrendFilter.kind === 'category' &&
+                  effectiveTrendFilter.categoryId === cat.id;
                 return (
-                  <div key={c.id} className="flex items-center gap-1.5 text-xs">
-                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: c.color }} />
-                    <span className="font-medium">{c.name}:</span>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      {formatDuration(ms)} ({share}%)
-                    </span>
-                  </div>
+                  <button
+                    key={cat.id}
+                    type="button"
+                    id={`trend-filter-cat-${cat.id}`}
+                    onClick={() => setTrendFilter({ kind: 'category', categoryId: cat.id })}
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
+                      isSelected
+                        ? 'bg-slate-900 text-white shadow-sm dark:bg-white dark:text-slate-900'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-300 dark:hover:bg-white/15'
+                    }`}
+                  >
+                    <span
+                      className="h-2 w-2 rounded-full shrink-0"
+                      style={{ backgroundColor: cat.color }}
+                    />
+                    <span>{cat.name}</span>
+                  </button>
                 );
               })}
             </div>
+
+            {/* Period-over-Period Comparison Strip */}
+            <div className="flex flex-wrap items-baseline justify-between gap-2 rounded-xl bg-slate-100/80 px-3.5 py-2.5 dark:bg-white/5">
+              <div>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {trendComparison.subjectLabel}
+                </span>
+                <p className="text-lg font-bold tracking-tight">
+                  {formatDuration(trendComparison.currentMs)}
+                </p>
+              </div>
+              <div className="text-right">
+                {trendComparison.deltaMs === 0 ? (
+                  <span className="inline-block rounded-full bg-slate-200/80 px-2.5 py-0.5 text-xs font-medium text-slate-600 dark:bg-white/10 dark:text-slate-300">
+                    No change {trendComparison.comparisonPeriodLabel}
+                  </span>
+                ) : (
+                  <span
+                    className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                      isDeltaGood
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                    }`}
+                  >
+                    {trendComparison.deltaMs > 0 ? '▲ +' : '▼ -'}
+                    {formatDuration(Math.abs(trendComparison.deltaMs))}
+                    {trendComparison.deltaPercent !== null
+                      ? ` (${trendComparison.deltaMs > 0 ? '+' : ''}${Math.round(
+                          trendComparison.deltaPercent,
+                        )}%)`
+                      : ''}{' '}
+                    {trendComparison.comparisonPeriodLabel}
+                  </span>
+                )}
+                <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  Previous: {formatDuration(trendComparison.previousMs)}
+                </p>
+              </div>
+            </div>
+
+            {/* Pulse / Heart-Rate Line Chart */}
+            <div className="h-56 w-full">
+              <Line data={lineData} options={lineOptions} />
+            </div>
+
+            {/* Legend for Visible Pulse Lines */}
+            <div className="flex flex-wrap justify-center gap-3 pt-1">
+              {trendSeries.datasets.map((ds) => (
+                <div key={ds.id} className="flex items-center gap-1.5 text-xs">
+                  <span
+                    className="h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: ds.color }}
+                  />
+                  <span className="font-medium">{ds.label}:</span>
+                  <span className="text-slate-500 dark:text-slate-400">
+                    {formatDuration(ds.totalMs)}
+                  </span>
+                </div>
+              ))}
+            </div>
           </section>
+
+          {/* Category Share Doughnut Chart */}
+          {summary.totalMs > 0 && (
+            <section aria-label="Category Share" className="card p-5">
+              <h3 className="mb-4 text-sm font-semibold text-slate-500 uppercase tracking-wide dark:text-slate-400">
+                Category Share
+              </h3>
+              <div className="relative mx-auto h-48 w-48">
+                <Doughnut data={doughnutData} options={doughnutOptions} />
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-xs text-slate-500 dark:text-slate-400">Total</span>
+                  <span className="text-sm font-bold">{formatDuration(summary.totalMs)}</span>
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap justify-center gap-3">
+                {activeCategoriesWithData.map((c) => {
+                  const share = Math.round(summary.categoryShares[c.id] ?? 0);
+                  const ms = summary.categoryTotals[c.id] ?? 0;
+                  return (
+                    <div key={c.id} className="flex items-center gap-1.5 text-xs">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: c.color }} />
+                      <span className="font-medium">{c.name}:</span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {formatDuration(ms)} ({share}%)
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
 
           {/* Stacked Bar Chart */}
           <section aria-label="Activity Breakdown" className="card p-5">

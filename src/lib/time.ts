@@ -504,3 +504,231 @@ export function getBarBins(
   return bins;
 }
 
+/* ------------------------------------------------------------------ */
+/* Trend / Pulse line chart helpers (category & type progress)        */
+/* ------------------------------------------------------------------ */
+
+export type TrendFilter =
+  | { kind: 'all' }
+  | { kind: 'type' }
+  | { kind: 'category'; categoryId: string };
+
+export interface TrendDataset {
+  id: string;
+  label: string;
+  color: string;
+  /** Duration in hours for each bin (rounded to 3 decimal places for smooth plotting) */
+  hoursData: number[];
+  /** Raw milliseconds for each bin */
+  msData: number[];
+  /** Total milliseconds across all bins in the period */
+  totalMs: number;
+}
+
+export interface TrendSeriesResult {
+  labels: string[];
+  datasets: TrendDataset[];
+  /** Present when a single category with dailyGoalMinutes is selected in Week or Month view */
+  dailyGoalHours: number | null;
+}
+
+export const TYPE_TREND_META: Record<
+  Category['type'],
+  { label: string; color: string }
+> = {
+  productive: { label: 'Productive', color: '#10b981' },
+  wasted: { label: 'Wasted', color: '#f43f5e' },
+  neutral: { label: 'Neutral', color: '#64748b' },
+};
+
+/**
+ * Builds pulse/heart-rate line datasets from period bins according to the active filter:
+ * - 'all': one line per visible category (non-archived or having tracked time in the bins)
+ * - 'type': three lines (Productive, Wasted, Neutral)
+ * - 'category': single line for the selected categoryId (+ optional daily goal line in week/month)
+ */
+export function getTrendSeries(
+  filter: TrendFilter,
+  bins: readonly BarBin[],
+  categories: readonly Category[],
+  period: StatsPeriod,
+): TrendSeriesResult {
+  const labels = bins.map((b) => b.label);
+  const toHours = (ms: number) => Number((ms / MS_PER_HOUR).toFixed(3));
+
+  if (filter.kind === 'category') {
+    const cat = categories.find((c) => c.id === filter.categoryId);
+    if (!cat) {
+      return { labels, datasets: [], dailyGoalHours: null };
+    }
+    const msData = bins.map((b) => b.categoryMs[cat.id] ?? 0);
+    const totalMs = msData.reduce((sum, v) => sum + v, 0);
+    const dailyGoalHours =
+      (period === 'week' || period === 'month') &&
+      cat.dailyGoalMinutes !== undefined &&
+      cat.dailyGoalMinutes > 0
+        ? Number((cat.dailyGoalMinutes / 60).toFixed(3))
+        : null;
+
+    return {
+      labels,
+      datasets: [
+        {
+          id: cat.id,
+          label: cat.name,
+          color: cat.color,
+          hoursData: msData.map(toHours),
+          msData,
+          totalMs,
+        },
+      ],
+      dailyGoalHours,
+    };
+  }
+
+  if (filter.kind === 'type') {
+    const categoryMap = new Map<string, Category>();
+    for (const c of categories) categoryMap.set(c.id, c);
+
+    const types: readonly Category['type'][] = ['productive', 'wasted', 'neutral'];
+    const datasets: TrendDataset[] = types.map((t) => {
+      const meta = TYPE_TREND_META[t];
+      const msData = bins.map((bin) => {
+        let sum = 0;
+        for (const [catId, ms] of Object.entries(bin.categoryMs)) {
+          const catType = categoryMap.get(catId)?.type ?? 'neutral';
+          if (catType === t) sum += ms;
+        }
+        return sum;
+      });
+      const totalMs = msData.reduce((s, v) => s + v, 0);
+      return {
+        id: `type-${t}`,
+        label: meta.label,
+        color: meta.color,
+        hoursData: msData.map(toHours),
+        msData,
+        totalMs,
+      };
+    });
+
+    return { labels, datasets, dailyGoalHours: null };
+  }
+
+  // filter.kind === 'all'
+  const visibleCategories = categories.filter((c) => {
+    if (!c.archived) return true;
+    return bins.some((b) => (b.categoryMs[c.id] ?? 0) > 0);
+  });
+
+  const datasets: TrendDataset[] = visibleCategories.map((cat) => {
+    const msData = bins.map((b) => b.categoryMs[cat.id] ?? 0);
+    const totalMs = msData.reduce((s, v) => s + v, 0);
+    return {
+      id: cat.id,
+      label: cat.name,
+      color: cat.color,
+      hoursData: msData.map(toHours),
+      msData,
+      totalMs,
+    };
+  });
+
+  return { labels, datasets, dailyGoalHours: null };
+}
+
+export interface TrendComparison {
+  subjectLabel: string;
+  currentMs: number;
+  previousMs: number;
+  /** currentMs - previousMs */
+  deltaMs: number;
+  /** Percentage change vs previous period, or null when previousMs === 0 */
+  deltaPercent: number | null;
+  /** Whether an increase in time is considered desirable (false for 'wasted' categories) */
+  increaseIsPositive: boolean;
+  comparisonPeriodLabel: string;
+}
+
+export function formatComparisonPeriodLabel(period: StatsPeriod): string {
+  switch (period) {
+    case 'day':
+      return 'vs prev day';
+    case 'week':
+      return 'vs prev week';
+    case 'month':
+      return 'vs prev month';
+    case 'year':
+      return 'vs prev year';
+  }
+}
+
+/**
+ * Compares the selected trend target between the current period and the immediately preceding period.
+ * - 'all': compares total tracked time
+ * - 'type': compares Productive time
+ * - 'category': compares that specific category's tracked time
+ */
+export function calculateTrendComparison(
+  filter: TrendFilter,
+  period: StatsPeriod,
+  referenceDate: number,
+  entries: readonly Entry[],
+  activeTimer: ActiveTimer,
+  categories: readonly Category[],
+  now: number,
+): TrendComparison {
+  const currentRange = getPeriodRange(period, referenceDate);
+  const prevRefDate = shiftPeriod(period, referenceDate, -1);
+  const prevRange = getPeriodRange(period, prevRefDate);
+
+  const currentSummary = calculateStatsSummary(
+    entries,
+    activeTimer,
+    categories,
+    currentRange.start,
+    currentRange.end,
+    now,
+  );
+  const prevSummary = calculateStatsSummary(
+    entries,
+    activeTimer,
+    categories,
+    prevRange.start,
+    prevRange.end,
+    now,
+  );
+
+  let subjectLabel = 'Total Tracked';
+  let currentMs = currentSummary.totalMs;
+  let previousMs = prevSummary.totalMs;
+  let increaseIsPositive = true;
+
+  if (filter.kind === 'type') {
+    subjectLabel = 'Productive Time';
+    currentMs = currentSummary.productiveMs;
+    previousMs = prevSummary.productiveMs;
+    increaseIsPositive = true;
+  } else if (filter.kind === 'category') {
+    const cat = categories.find((c) => c.id === filter.categoryId);
+    subjectLabel = cat?.name ?? 'Category';
+    currentMs = currentSummary.categoryTotals[filter.categoryId] ?? 0;
+    previousMs = prevSummary.categoryTotals[filter.categoryId] ?? 0;
+    increaseIsPositive = cat?.type !== 'wasted';
+  }
+
+  const deltaMs = currentMs - previousMs;
+  const deltaPercent = previousMs > 0 ? ((currentMs - previousMs) / previousMs) * 100 : null;
+
+  return {
+    subjectLabel,
+    currentMs,
+    previousMs,
+    deltaMs,
+    deltaPercent,
+    increaseIsPositive,
+    comparisonPeriodLabel: formatComparisonPeriodLabel(period),
+  };
+}
+
+

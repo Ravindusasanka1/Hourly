@@ -3,12 +3,14 @@ import {
   MS_PER_HOUR,
   MS_PER_MINUTE,
   calculateStatsSummary,
+  calculateTrendComparison,
   canNavigateNext,
   clampBackdateMs,
   crossesMidnight,
   defaultManualRange,
   findOverlaps,
   formatClock,
+  formatComparisonPeriodLabel,
   formatDayLabel,
   formatDuration,
   formatPeriodLabel,
@@ -20,6 +22,7 @@ import {
   getPeriodRange,
   getRingProgress,
   getTodayTotalsByCategory,
+  getTrendSeries,
   groupEntriesByStartDay,
   overlapMs,
   rangesOverlap,
@@ -499,5 +502,143 @@ describe('Stage 3: getBarBins for charts', () => {
     expect(bins[9].totalMs).toBe(90 * MS_PER_MINUTE);
   });
 });
+
+describe('Trend / Pulse line chart helpers (getTrendSeries & calculateTrendComparison)', () => {
+  const categories: Category[] = [
+    { id: 'c-work', name: 'Work', color: '#4f46e5', type: 'productive', archived: false, dailyGoalMinutes: 120 },
+    { id: 'c-study', name: 'Study', color: '#0ea5e9', type: 'productive', archived: false },
+    { id: 'c-social', name: 'Social Media', color: '#f43f5e', type: 'wasted', archived: false },
+    { id: 'c-break', name: 'Break', color: '#64748b', type: 'neutral', archived: false },
+    { id: 'c-old', name: 'Archived Cat', color: '#a855f7', type: 'productive', archived: true },
+  ];
+
+  const wednesday = new Date(2026, 9, 28, 0, 0, 0).getTime(); // Wed Oct 28, 2026
+  const tuesday = wednesday - 24 * MS_PER_HOUR; // Tue Oct 27, 2026
+  const now = wednesday + 20 * MS_PER_HOUR;
+
+  const entries: Entry[] = [
+    // Tuesday: 1h Work, 2h Social
+    { id: 'tue-1', categoryId: 'c-work', start: tuesday + 9 * MS_PER_HOUR, end: tuesday + 10 * MS_PER_HOUR },
+    { id: 'tue-2', categoryId: 'c-social', start: tuesday + 14 * MS_PER_HOUR, end: tuesday + 16 * MS_PER_HOUR },
+    // Wednesday: 2h Work, 1h Study, 30m Social, 30m Break
+    { id: 'wed-1', categoryId: 'c-work', start: wednesday + 9 * MS_PER_HOUR, end: wednesday + 11 * MS_PER_HOUR },
+    { id: 'wed-2', categoryId: 'c-study', start: wednesday + 11 * MS_PER_HOUR, end: wednesday + 12 * MS_PER_HOUR },
+    { id: 'wed-3', categoryId: 'c-social', start: wednesday + 14 * MS_PER_HOUR, end: wednesday + 14 * MS_PER_HOUR + 30 * MS_PER_MINUTE },
+    { id: 'wed-4', categoryId: 'c-break', start: wednesday + 15 * MS_PER_HOUR, end: wednesday + 15 * MS_PER_HOUR + 30 * MS_PER_MINUTE },
+  ];
+
+  it('builds datasets for all non-archived categories in "all" mode', () => {
+    const bins = getBarBins('day', wednesday, entries, null, now);
+    const series = getTrendSeries({ kind: 'all' }, bins, categories, 'day');
+
+    // c-old is archived with 0 time -> excluded; 4 non-archived categories -> included
+    expect(series.datasets).toHaveLength(4);
+    expect(series.dailyGoalHours).toBeNull();
+
+    const workDs = series.datasets.find((d) => d.id === 'c-work')!;
+    expect(workDs.totalMs).toBe(2 * MS_PER_HOUR);
+    expect(workDs.hoursData[9]).toBe(1);
+    expect(workDs.hoursData[10]).toBe(1);
+    expect(workDs.hoursData[8]).toBe(0);
+  });
+
+  it('builds Productive, Wasted, and Neutral lines in "type" mode', () => {
+    const bins = getBarBins('day', wednesday, entries, null, now);
+    const series = getTrendSeries({ kind: 'type' }, bins, categories, 'day');
+
+    expect(series.datasets).toHaveLength(3);
+    const prodDs = series.datasets.find((d) => d.id === 'type-productive')!;
+    const wastedDs = series.datasets.find((d) => d.id === 'type-wasted')!;
+    const neutralDs = series.datasets.find((d) => d.id === 'type-neutral')!;
+
+    // Productive on Wed: 2h Work + 1h Study = 3h
+    expect(prodDs.totalMs).toBe(3 * MS_PER_HOUR);
+    expect(prodDs.hoursData[9]).toBe(1);
+    expect(prodDs.hoursData[10]).toBe(1);
+    expect(prodDs.hoursData[11]).toBe(1);
+
+    // Wasted on Wed: 30m Social at 14:00
+    expect(wastedDs.totalMs).toBe(30 * MS_PER_MINUTE);
+    expect(wastedDs.hoursData[14]).toBe(0.5);
+
+    // Neutral on Wed: 30m Break at 15:00
+    expect(neutralDs.totalMs).toBe(30 * MS_PER_MINUTE);
+    expect(neutralDs.hoursData[15]).toBe(0.5);
+  });
+
+  it('builds a single line and includes dailyGoalHours in week/month view when category is selected', () => {
+    const weekBins = getBarBins('week', wednesday, entries, null, now);
+    const weekSeries = getTrendSeries({ kind: 'category', categoryId: 'c-work' }, weekBins, categories, 'week');
+
+    expect(weekSeries.datasets).toHaveLength(1);
+    expect(weekSeries.datasets[0].label).toBe('Work');
+    // Tue (index 1) = 1h, Wed (index 2) = 2h -> total 3h
+    expect(weekSeries.datasets[0].hoursData[1]).toBe(1);
+    expect(weekSeries.datasets[0].hoursData[2]).toBe(2);
+    expect(weekSeries.datasets[0].totalMs).toBe(3 * MS_PER_HOUR);
+    // Work has dailyGoalMinutes: 120 -> 2 hours in week view
+    expect(weekSeries.dailyGoalHours).toBe(2);
+
+    // In 'day' view, dailyGoalHours should be null because bins are hours, not days
+    const dayBins = getBarBins('day', wednesday, entries, null, now);
+    const daySeries = getTrendSeries({ kind: 'category', categoryId: 'c-work' }, dayBins, categories, 'day');
+    expect(daySeries.dailyGoalHours).toBeNull();
+  });
+
+  it('compares current period vs previous period accurately across filter modes', () => {
+    // 1. Productive vs Wasted ('type' mode): Wed Productive = 3h, Tue Productive = 1h -> +2h (+200%)
+    const typeComp = calculateTrendComparison(
+      { kind: 'type' },
+      'day',
+      wednesday,
+      entries,
+      null,
+      categories,
+      now,
+    );
+    expect(typeComp.subjectLabel).toBe('Productive Time');
+    expect(typeComp.currentMs).toBe(3 * MS_PER_HOUR);
+    expect(typeComp.previousMs).toBe(1 * MS_PER_HOUR);
+    expect(typeComp.deltaMs).toBe(2 * MS_PER_HOUR);
+    expect(typeComp.deltaPercent).toBeCloseTo(200);
+    expect(typeComp.increaseIsPositive).toBe(true);
+    expect(typeComp.comparisonPeriodLabel).toBe('vs prev day');
+
+    // 2. Single wasted category ('c-social'): Wed = 30m, Tue = 2h -> -1h 30m (-75%)
+    const socialComp = calculateTrendComparison(
+      { kind: 'category', categoryId: 'c-social' },
+      'day',
+      wednesday,
+      entries,
+      null,
+      categories,
+      now,
+    );
+    expect(socialComp.subjectLabel).toBe('Social Media');
+    expect(socialComp.currentMs).toBe(30 * MS_PER_MINUTE);
+    expect(socialComp.previousMs).toBe(2 * MS_PER_HOUR);
+    expect(socialComp.deltaMs).toBe(-90 * MS_PER_MINUTE);
+    expect(socialComp.deltaPercent).toBeCloseTo(-75);
+    expect(socialComp.increaseIsPositive).toBe(false);
+
+    // 3. Previous period has 0 time -> deltaPercent is null
+    const studyComp = calculateTrendComparison(
+      { kind: 'category', categoryId: 'c-study' },
+      'day',
+      wednesday,
+      entries,
+      null,
+      categories,
+      now,
+    );
+    expect(studyComp.currentMs).toBe(1 * MS_PER_HOUR);
+    expect(studyComp.previousMs).toBe(0);
+    expect(studyComp.deltaPercent).toBeNull();
+    expect(formatComparisonPeriodLabel('week')).toBe('vs prev week');
+    expect(formatComparisonPeriodLabel('month')).toBe('vs prev month');
+    expect(formatComparisonPeriodLabel('year')).toBe('vs prev year');
+  });
+});
+
 
 
